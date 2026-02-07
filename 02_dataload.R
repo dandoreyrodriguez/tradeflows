@@ -14,6 +14,7 @@ conflicted::conflicts_prefer(dplyr::filter)
 
 # Generate parquet path
 generate_parquet_path <- function(
+    dataset = "Tariffline",
     typeCode = "C",
     clCode = "HS",
     freqCode = "M"
@@ -22,6 +23,7 @@ generate_parquet_path <- function(
         "data",
         "comtrade",
         "parquet",
+        paste0("dataset=", dataset),
         paste0("type=", typeCode),
         paste0("cl=", clCode),
         paste0("freq=", freqCode)
@@ -36,7 +38,7 @@ parquet_glob <- file.path(generate_parquet_path(), "**", "*.parquet")
 # establish duckdb connection
 con <- dbConnect(duckdb(), dbdir = db_path)
 # get data
-dbExecute(
+tmp <- dbExecute(
     con,
     sprintf(
         "CREATE OR REPLACE VIEW comtrade_all AS
@@ -44,8 +46,20 @@ dbExecute(
         parquet_glob
     )
 )
-# save as db object
-df <- tbl(con, "comtrade_all")
+
+q <- tbl(con, "comtrade_all") |>
+  filter(flowCategory == "M") |>
+  group_by(reporterCode) |>
+  summarise(
+    n_row  = n(),
+    n_part = n_distinct(partnerCode),
+    no_dig = mean(sql("length(CAST(cmdCode AS VARCHAR))")),
+    .groups = "drop"
+  )
+
+show_query(q)
+df <- collect(q)
+
 
 # disconnect
 dbDisconnect(con, shutdown = TRUE)
