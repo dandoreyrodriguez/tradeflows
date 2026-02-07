@@ -27,7 +27,7 @@ R is used for:
 - `dbplyr` pipelines
 - tidyverse-style cleaning and analysis
 
-The key reason we use R is because it is able to deploy the power of tidyverse operations on duckdb (databases) objects directly, without us having to commit huge objects to memory. `dbply` allows us to use `dplyr` logic, and translates familiar operations to SQL in the background...so we don't have to!
+The key reason we use R is because it is able to deploy the power of `tidyverse` operations on `duckdb` (database) objects directly, without us having to commit huge objects to memory. `dbply` translates familiar `dplyr` operations to SQL in the background...so we don't have to!
 
 ---
 
