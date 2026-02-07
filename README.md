@@ -4,7 +4,7 @@
 
 Project TradeFlows a **tooling-first pipeline** for doing **trade analysis**. It is a **scalable system** that allows the user to access graunlar trade data for research and policy. 
 
-For import/export data, the pipeline uses UN Comtrade via their `comtradeapicall` python package. Users can access the raw data provided by national authorities or work with harmonised data. For  tariff calculations, we assemble national sources.  
+For import/export data, the pipeline uses **UN Comtrade** data, via their `comtradeapicall` python package. Users can access the raw data provided by national authorities or work with UN-harmonised data. For  tariff calculations, we assemble national sources.  
 
 ---
 
@@ -39,8 +39,6 @@ The key reason we use R is because it is able to deploy the power of tidyverse o
 - Writes Hive-partitioned, split-up parquet files
 - Produces structured per-reporter and multi-report summaries
 - Logs every action
-
-Everything is explicit. Nothing is guessed.
 
 ---
 
