@@ -6,9 +6,9 @@ Project TradeFlows a **tooling-first pipeline** for doing **trade analysis**. It
 
 For import/export data, the pipeline uses UN Comtrade via their `comtradeapicall` python package. Users can access the raw data provided by national authorities or work with harmonised data. For  tariff calculations, we assemble national sources.  
 
---
+---
 
-## Architecture
+## Architecture 
 
 It is a **multi-language pipeline**, because good tools matter more than language purity.
 
@@ -65,6 +65,8 @@ data/
 01a_comtrade_datafetch.py
 01b_tariffs_datafetch.py
 02_dataload.R
+.env                         # where API keys are stored (in .gitignore) 
+.gitignore
 ```
 
 ## What TradeFlows will do
