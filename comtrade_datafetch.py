@@ -2,15 +2,17 @@
 # TRADEFLOWS PROJECT #
 ######################
 # Author: DDR
-# Prupose: Bulk download, foldering, create parquets
+# Purpose: Bulk download, foldering, create parquets
 
 # prepare workspace
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from pathlib import Path
 import os
 import re
 import inspect
+import logging
+import json
 import pandas as pd
 from dotenv import load_dotenv
 from collections.abc import Iterable
@@ -20,9 +22,74 @@ import comtradeapicall
 
 ### 1. Configure  -------------------------------------
 
+def _json_ready(obj):
+    """
+    JSON only supports dict/list/str/number/bool/null.
+    Converts dicts/tuples to lists so JSON can handle them.
+    Note, this is recursive to handle dicts within dicts, etc.
+    """
+    if isinstance(obj, dict):
+        return {k: _json_ready(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_ready(v) for v in obj]
+    if isinstance(obj, tuple):
+        return [_json_ready(v) for v in obj]
+    return obj
+
+def write_manifest(report: MultiDownloadReport, manifest_path: Path) -> Path:
+    """
+    Convert MultiDownloadReport and content (including DownloadReportperReporter) into JSON manifest
+    """
+    payload = _json_ready(asdict(report))
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    # write the JSON
+    manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return manifest_path
+
 
 _ALLOWED_DATASETS = {"Tariffline", "Final"}
 _ALLOWED_FREQ = {"M", "A"}
+
+logger = logging.getLogger("tradeflows")
+
+def setup_logging(log_dir: Path, *, timestamped: bool = False) -> None:
+    """
+    Configure logging with handlers.
+    - Console will be INFO+
+    - File: DEBUG+ (saved to log_dir/tradeflows.log)
+    """
+
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    if timestamped:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        log_file = log_dir / f"tradeflows_{ts}.log"
+    else: 
+        log_file = log_dir / "tradeflows.log"
+
+
+    logger.setLevel(logging.DEBUG) # logger lowest level
+
+    # stops messages duplicating if setup_logging() is called multiple times
+    logger.handlers.clear()
+    logger.propagate = False
+
+    # set up destinations
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+
+    # choose formatting 
+    fmt = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    formatter = logging.Formatter(fmt)
+
+    console_handler.setFormatter(formatter)
+    file_handler.setFormatter(formatter)
+
+    logger.addHandler(console_handler)
+    logger.addHandler(file_handler)
+
 
 
 @dataclass(frozen=True)
@@ -104,6 +171,8 @@ def build_period_list(freqCode: str, start: str, end: str) -> list[str]:
         # yearly range
         pr = range(int(start), int(end) + 1)
         return [str(p) for p in pr]
+    
+    else: raise ValueError("Invalid frequency code.")
 
 # ii. directory helpers
 
@@ -201,7 +270,7 @@ def convert_period_txt_to_parquet(
         output_file = parquet_dir / (txt.stem + ".parquet")
         
         if output_file.exists() and (not overwrite):
-            print(f"  Skipping Parquet conversion...parquet already exists")
+            logger.debug("  Skipping Parquet conversion...parquet already exists")
             continue
 
         if chunk_size is None:
@@ -215,7 +284,7 @@ def convert_period_txt_to_parquet(
             ):
                 part_file = parquet_dir / f"{txt.stem}.part{part:04d}.parquet"
                 if part_file.exists() and (not overwrite):
-                    print(f"  Skipping Parquet part {part} conversion...parquet already exists")
+                    logger.debug("  Skipping Parquet part %s conversion...parquet already exists", part)
                     part += 1
                     continue
                 else: 
@@ -238,7 +307,7 @@ def require_fn(name: str):
     return fn
 
 
-def get_bulk_availability(api_key: str, *, reporterCode: int, cfg: ComtradeBulkConfig) -> pd.DataFrame:
+def get_bulk_availability(api_key: str, *, reporterCode: int, cfg: ComtradeBulkConfig) -> pd.DataFrame | None:
     """
     Returns availability dataframe which must have a 'period' column.
     Tariffline availability if cfg.dataset='tariffline'. Final availability if cfg.dataset='Final'.
@@ -306,9 +375,9 @@ def download_one_period(
 
     # if cfg.overwrite is False and there is a raw file already
     if (not cfg.overwrite) and has_any_txt(raw_dir):
-        print(f"Skipping download...raw data for reporter {reporter} in {period} already exists.")
+        logger.info("Skipping download...raw data for reporter %s in %s already exists.", reporter, period)
     else: 
-        print(f"Downloading {cfg.dataset} data for reporter {reporter} in {period}.") 
+        logger.info("Downloading %s data for reporter %s in %s.", cfg.dataset, reporter, period) 
 
         if cfg.dataset=="Tariffline":
             fn = require_fn("bulkDownloadTarifflineFile")
@@ -316,22 +385,30 @@ def download_one_period(
             fn = require_fn("bulkDownloadFinalFile")
 
         # download data
-        fn(
-            api_key,
-            directory = str(raw_dir),
-            typeCode = cfg.typeCode, 
-            freqCode = cfg.freqCode,
-            clCode = cfg.clCode, 
-            period = period, 
-            reporterCode = reporter, 
-            decompress = cfg.decompress 
-        )
+        try:
+            fn(
+                api_key,
+                directory=str(raw_dir),
+                typeCode=cfg.typeCode,
+                freqCode=cfg.freqCode,
+                clCode=cfg.clCode,
+                period=period,
+                reporterCode=reporter,
+                decompress=cfg.decompress,
+            )
+        except Exception:
+            logger.exception(
+                "Download failed dataset=%s reporter=%s period=%s raw_dir=%s",
+                cfg.dataset, reporter, period, raw_dir
+            )
+            raise
+
 
     if convert_to_parquet:
         pq_dir = parquet_period_dir(paths, cfg, period, reporter)
         written = convert_period_txt_to_parquet(raw_dir, pq_dir, overwrite=cfg.overwrite, chunk_size=chunk_size)
         if written:
-            print(f" Parquet written: {len(written)} file(s) for {period}.")
+            logger.info(" Parquet written: %s file(s) for %s.", len(written), period)
         
 
 @dataclass(frozen=True)
@@ -363,7 +440,7 @@ def download_bulk_range_one(
     available_df = get_bulk_availability(api_key, reporterCode=reporter, cfg=cfg)
 
     if available_df is None: 
-        print(f"No available {cfg.dataset} data at all for reporter {reporter}")
+        logger.info("No available %s data at all for reporter %s.", cfg.dataset, reporter)
         return DownloadReportperReporter(
             reporter=reporter, 
             requested=requested_periods,
@@ -431,7 +508,7 @@ def download_bulk_range_many(
     total_reporters = len(per)
     total_requested_periods = sum(len(r.requested) for r in per.values())
     total_downloaded_periods = sum(len(r.downloaded_or_present) for r in per.values())
-    total_missing_periods = total_downloaded_periods - total_requested_periods
+    total_missing_periods =  total_requested_periods - total_downloaded_periods
     created_utc = datetime.now(timezone.utc).isoformat()
 
     return MultiDownloadReport(
@@ -470,9 +547,19 @@ def as_int_list(x) -> list[int]:
 
 ## 3. Execution code ----------------
 
-
-if __name__=="__main__":
-
+def run_download(
+    *,
+    iso3_codes: list[str],
+    start: str,
+    end: str,
+    dataset: str = "Tariffline",
+    freqCode: str = "M",
+    typeCode: str = "C",
+    clCode: str = "HS",
+    decompress: bool = True,
+    overwrite: bool = False,
+) -> None:
+    
     load_dotenv()
     api_key = os.getenv("COMTRADE_API_KEY_PRIMARY")
     if not api_key:
@@ -481,7 +568,8 @@ if __name__=="__main__":
     project_root = Path(__file__).resolve().parent
     paths = ensure_base_dirs(project_root)
 
-    iso3_codes = ["GBR","USA"]
+    setup_logging(paths["logs"], timestamped=True)
+
     mapping: dict[str, list[int]] = {}
     for iso3 in iso3_codes:
         raw = comtradeapicall.convertCountryIso3ToCode(iso3)
@@ -493,12 +581,26 @@ if __name__=="__main__":
 
     cfg = ComtradeBulkConfig(
         reporterCodes=tuple(all_reporter_codes),
-        start="2025-08",
-        end="2025-10",
-        typeCode="C",
-        clCode="HS",
-        freqCode="M",
-        dataset="Tariffline"
+        start=start,
+        end=end,
+        typeCode=typeCode,
+        clCode=clCode,
+        freqCode=freqCode,
+        dataset=dataset, 
+        decompress=decompress, 
+        overwrite=overwrite,
     )
 
     multi = download_bulk_range_many(api_key, cfg, paths)
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    manifest_path = paths["logs"] / f"download_manifest_{ts}.json"
+    write_manifest(multi, manifest_path)
+    logger.info("Manifest written: %s", manifest_path)
+
+
+
+
+
+
+

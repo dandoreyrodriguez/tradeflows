@@ -19,7 +19,9 @@ Python handles:
 - availability checks
 - raw → parquet conversion
 - logging and manifests
+- CLI interface using `tradeflows` command
 
+Ingesting the data via a CLI facilitates repeatable, parameterised runs without the need to edit code. `python3` shines here.
 
 ### R + DuckDB: analysis without memory pain
 R is used for:
@@ -33,7 +35,7 @@ The key reason we use R is because it is able to deploy the power of `tidyverse`
 
 ## What TradeFlows does today
 
-- Accepts ISO-3 country codes
+- Accepts ISO-3 country codes via CLI interface
 - Checks data availability before downloading
 - Downloads Tariffline (raw) or Final (harmonised) datasets
 - Writes Hive-partitioned, split-up parquet files
@@ -59,13 +61,19 @@ data/
     │       └── ...
     └── logs/
         └── tradeflows.log
+tradeflows.cli/
+├── __init__.py
+└── tradeflows_cli.py
 
+pyproject.toml
 01a_comtrade_datafetch.py
 01b_tariffs_datafetch.py
 02_dataload.R
+README.md
 .env                         # where API keys are stored (in .gitignore) 
 .gitignore
 ```
+---
 
 ## What TradeFlows will do
 
