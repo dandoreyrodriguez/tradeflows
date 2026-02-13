@@ -19,6 +19,12 @@ from collections.abc import Iterable
 from datetime import datetime, timezone
 import comtradeapicall
 
+# import own modules
+from tradeflows_cli.paths import ensure_dataset_dirs, DataPaths
+from tradeflows_cli.logging import setup_logging, get_logger
+from tradeflows_cli.hs_codes import hs_index_path, update_hs_index
+
+logger = get_logger() # module-level logger
 
 ### 1. Configure  -------------------------------------
 
@@ -34,6 +40,10 @@ def _json_ready(obj):
         return [_json_ready(v) for v in obj]
     if isinstance(obj, tuple):
         return [_json_ready(v) for v in obj]
+    if isinstance(obj, set):
+        return [_json_ready(v) for v in sorted(obj)]
+    if isinstance(obj, Path):
+        return str(obj)
     return obj
 
 def write_manifest(report: MultiDownloadReport, manifest_path: Path) -> Path:
@@ -49,47 +59,6 @@ def write_manifest(report: MultiDownloadReport, manifest_path: Path) -> Path:
 
 _ALLOWED_DATASETS = {"Tariffline", "Final"}
 _ALLOWED_FREQ = {"M", "A"}
-
-logger = logging.getLogger("tradeflows")
-
-def setup_logging(log_dir: Path, *, timestamped: bool = False) -> None:
-    """
-    Configure logging with handlers.
-    - Console will be INFO+
-    - File: DEBUG+ (saved to log_dir/tradeflows.log)
-    """
-
-    log_dir.mkdir(parents=True, exist_ok=True)
-
-    if timestamped:
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        log_file = log_dir / f"tradeflows_{ts}.log"
-    else: 
-        log_file = log_dir / "tradeflows.log"
-
-
-    logger.setLevel(logging.DEBUG) # logger lowest level
-
-    # stops messages duplicating if setup_logging() is called multiple times
-    logger.handlers.clear()
-    logger.propagate = False
-
-    # set up destinations
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
-    file_handler.setLevel(logging.DEBUG)
-
-    # choose formatting 
-    fmt = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-    formatter = logging.Formatter(fmt)
-
-    console_handler.setFormatter(formatter)
-    file_handler.setFormatter(formatter)
-
-    logger.addHandler(console_handler)
-    logger.addHandler(file_handler)
-
 
 
 @dataclass(frozen=True)
@@ -176,24 +145,8 @@ def build_period_list(freqCode: str, start: str, end: str) -> list[str]:
 
 # ii. directory helpers
 
-def ensure_base_dirs(project_root: Path) -> dict[str, Path]:
-    """
-    Ensures correct base directories are created or exist.
-    """
-    base = project_root / "data" / "comtrade"
-    paths = {
-        "base": base,
-        "raw": base / "raw",
-        "parquet": base / "parquet",
-        "logs": base / "logs",
-    }
-    for p in paths.values():
-        p.mkdir(parents=True, exist_ok=True)
-    return paths
-
-
 def raw_period_dir(
-    paths: dict[str, Path], 
+    paths: DataPaths, 
     cfg: ComtradeBulkConfig, 
     period: str, 
     reporter: int,
@@ -202,7 +155,7 @@ def raw_period_dir(
     Creates a folder for raw data for a given reporter, period pair.  Consistent with Hive partitioning.
     """
     p = (
-        paths["raw"]
+        paths.raw
         / f"dataset={cfg.dataset}"
         / f"type={cfg.typeCode}"
         / f"cl={cfg.clCode}"
@@ -214,7 +167,7 @@ def raw_period_dir(
     return p
 
 def parquet_period_dir(
-    paths: dict[str, Path], 
+    paths: DataPaths, 
     cfg: ComtradeBulkConfig, 
     period: str,
     reporter: int,
@@ -223,7 +176,7 @@ def parquet_period_dir(
     Creates a folder for paqruet data for a given reporter, period pair.  Consistent with Hive partitioning.
     """
     p = (
-        paths["parquet"]
+        paths.parquet
         / f"dataset={cfg.dataset}"
         / f"type={cfg.typeCode}"
         / f"cl={cfg.clCode}"
@@ -245,6 +198,7 @@ def has_any_parquet(dirpath: Path) -> bool:
     return any(p.is_file() for p in dirpath.rglob("*.parquet"))
 
 
+
 # iii. parquet writer
 
 def convert_period_txt_to_parquet(
@@ -254,7 +208,7 @@ def convert_period_txt_to_parquet(
     overwrite: bool = False,
     sep: str = "\t",
     chunk_size: int | None = None,
-) -> list[Path]:
+) -> tuple[list[Path], set[str]]:
     """
     Converts every .txt file in raw_dir into a .parquet file in parquet_dir.
     Returns a list of parquets created.
@@ -264,6 +218,8 @@ def convert_period_txt_to_parquet(
         raise ValueError(f"No .txt files found under {raw_dir}!")
 
     written: list[Path] = []
+    per_period_cmdCodes = set() # catcher of unique codes
+
 
     for txt in txt_files:
 
@@ -275,6 +231,7 @@ def convert_period_txt_to_parquet(
 
         if chunk_size is None:
             df = pd.read_csv(txt, sep=sep, low_memory=False)
+            per_period_cmdCodes.update(df["cmdCode"].dropna().astype(str).str.strip()) # extract unique HS codes
             df.to_parquet(output_file, index=False)
             written.append(output_file)
         else:
@@ -287,12 +244,13 @@ def convert_period_txt_to_parquet(
                     logger.debug("  Skipping Parquet part %s conversion...parquet already exists", part)
                     part += 1
                     continue
-                else: 
+                else:
+                    per_period_cmdCodes.update(chunk["cmdCode"].dropna().astype(str).str.strip()) # extract unique HS codes
                     chunk.to_parquet(part_file, index=False)
                     written.append(part_file)
                     part += 1
 
-    return written
+    return written, per_period_cmdCodes
 
 # iii. Checking data availability in UN comtrade
 
@@ -361,13 +319,13 @@ def select_available_periods(
 def download_one_period(
         api_key: str, 
         cfg : ComtradeBulkConfig, 
-        paths: dict[str, Path],
+        paths: DataPaths,
         reporter: int,
         period: str, 
         *,
         convert_to_parquet: bool = True, 
         chunk_size: int | None = 1_000_000,
-) -> None:
+) -> set[str]:
     """
     Download one raw .txt file per reporter, period pair.
     """
@@ -403,12 +361,18 @@ def download_one_period(
             )
             raise
 
+    per_period_cmdCodes: set[str] = set()
 
     if convert_to_parquet:
         pq_dir = parquet_period_dir(paths, cfg, period, reporter)
-        written = convert_period_txt_to_parquet(raw_dir, pq_dir, overwrite=cfg.overwrite, chunk_size=chunk_size)
+        written, per_period_cmdCodes = convert_period_txt_to_parquet(raw_dir, pq_dir, overwrite=cfg.overwrite, chunk_size=chunk_size)
+        idx = hs_index_path(paths.meta, dataset=cfg.dataset, clCode=cfg.clCode, freqCode=cfg.freqCode)
+        _ = update_hs_index(idx.index_file, new_codes=per_period_cmdCodes)
+
         if written:
             logger.info(" Parquet written: %s file(s) for %s.", len(written), period)
+
+    return per_period_cmdCodes
         
 
 @dataclass(frozen=True)
@@ -423,12 +387,13 @@ class DownloadReportperReporter:
     downloaded_or_present: list[str]
     min_available: str | None
     max_available: str | None
+    unique_hs_codes: set[str]
 
 
 def download_bulk_range_one(
         api_key: str,
         cfg: ComtradeBulkConfig,
-        paths: dict[str, Path],
+        paths: DataPaths,
         *,
         reporter: int, 
     ) -> DownloadReportperReporter:
@@ -438,6 +403,8 @@ def download_bulk_range_one(
     requested_periods = build_period_list(cfg.freqCode, cfg.start, cfg.end)
     
     available_df = get_bulk_availability(api_key, reporterCode=reporter, cfg=cfg)
+
+    per_reporter_cmdCodes: set[str] = set()
 
     if available_df is None: 
         logger.info("No available %s data at all for reporter %s.", cfg.dataset, reporter)
@@ -449,6 +416,7 @@ def download_bulk_range_one(
             downloaded_or_present=[],
             min_available=None,
             max_available=None,
+            unique_hs_codes=set(),
         )
     
     available_periods = select_available_periods(requested_periods, available_df)
@@ -461,8 +429,9 @@ def download_bulk_range_one(
     downloaded_or_present: list[str] = []
     
     for period in available_periods:
-        download_one_period(api_key, cfg, paths, reporter = reporter, period=period)
+        per_period_cmdCodes = download_one_period(api_key, cfg, paths, reporter = reporter, period=period)
         downloaded_or_present.append(period)
+        per_reporter_cmdCodes.update(per_period_cmdCodes)
 
     return DownloadReportperReporter(
         reporter=reporter,
@@ -472,6 +441,7 @@ def download_bulk_range_one(
         downloaded_or_present=downloaded_or_present,
         min_available=min_possible,
         max_available=max_possible,
+        unique_hs_codes=per_reporter_cmdCodes,
     )
 
 
@@ -492,23 +462,21 @@ class MultiDownloadReport:
     per_reporter: dict[int, DownloadReportperReporter]
 
 
-
 def download_bulk_range_many(
         api_key: str, 
         cfg: ComtradeBulkConfig,
-        paths: dict[str, Path]
+        paths: DataPaths
     ) -> MultiDownloadReport:
 
     per: dict[int, DownloadReportperReporter] = {}
 
     for reporter in cfg.reporterCodes:
-        per[reporter] = download_bulk_range_one(api_key, cfg, paths, reporter=reporter)
+        report_per_reporter = download_bulk_range_one(api_key, cfg, paths, reporter=reporter)
+        per[reporter] = report_per_reporter
 
     # totals (simple and transparent)
-    total_reporters = len(per)
     total_requested_periods = sum(len(r.requested) for r in per.values())
     total_downloaded_periods = sum(len(r.downloaded_or_present) for r in per.values())
-    total_missing_periods =  total_requested_periods - total_downloaded_periods
     created_utc = datetime.now(timezone.utc).isoformat()
 
     return MultiDownloadReport(
@@ -518,10 +486,10 @@ def download_bulk_range_many(
         end=cfg.end,
         reporters=cfg.reporterCodes,
         created_utc=created_utc,
-        total_reporters=total_reporters,
+        total_reporters=len(per),
         total_requested_periods=total_requested_periods,
         total_downloaded_periods=total_downloaded_periods,
-        total_missing_periods=total_missing_periods,
+        total_missing_periods=total_requested_periods-total_downloaded_periods,
         per_reporter=per,
     )
 
@@ -547,7 +515,7 @@ def as_int_list(x) -> list[int]:
 
 ## 3. Execution code ----------------
 
-def run_download(
+def run_comtrade_download(
     *,
     iso3_codes: list[str],
     start: str,
@@ -565,10 +533,8 @@ def run_download(
     if not api_key:
         raise RuntimeError("Missing COMTRADE_API_KEY_PRIMARY in .env")
 
-    project_root = Path(__file__).resolve().parent
-    paths = ensure_base_dirs(project_root)
-
-    setup_logging(paths["logs"], timestamped=True)
+    paths = ensure_dataset_dirs("comtrade")
+    _ = setup_logging(paths.logs, timestamped=True)
 
     mapping: dict[str, list[int]] = {}
     for iso3 in iso3_codes:
@@ -594,7 +560,7 @@ def run_download(
     multi = download_bulk_range_many(api_key, cfg, paths)
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    manifest_path = paths["logs"] / f"download_manifest_{ts}.json"
+    manifest_path = paths.logs / f"download_manifest_{ts}.json"
     write_manifest(multi, manifest_path)
     logger.info("Manifest written: %s", manifest_path)
 

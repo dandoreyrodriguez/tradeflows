@@ -1,5 +1,5 @@
 import argparse
-from comtrade_datafetch import run_download
+from comtrade_datafetch import run_comtrade_download
 
 # helper for dealing with boolean values in CLI
 def str_to_bool(value: str) -> bool:
@@ -19,7 +19,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="tradeflows")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    download = sub.add_parser("download", help="Download data from UN Comtrade")
+    download = sub.add_parser("download_comtrade", help="Download data from UN Comtrade")
     download.add_argument("--iso3", required=True, help="Comma-separated ISO3 codes, e.g. GBR, USA")
     download.add_argument("--start", required=True, help="Start period, e.g. 2025-08")
     download.add_argument("--end", required=True, help="End period, e.g. 2025-10")
@@ -33,11 +33,11 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.cmd == "download":
+    if args.cmd == "download_comtrade":
 
         iso3_codes = [s.strip() for s in args.iso3.split(",") if s.strip()]
 
-        run_download(
+        run_comtrade_download(
             iso3_codes=iso3_codes,
             start=args.start,
             end=args.end,

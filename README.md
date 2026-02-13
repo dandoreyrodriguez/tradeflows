@@ -4,13 +4,13 @@
 
 Project TradeFlows a **tooling-first pipeline** for doing **trade analysis**. It is a **scalable system** that allows the user to access graunlar trade data for research and policy. 
 
-For import/export data, the pipeline uses **UN Comtrade** data, via their `comtradeapicall` python package. Users can access the raw data provided by national authorities or work with UN-harmonised data. For  tariff calculations, we assemble national sources.  
+For flows data, the pipeline uses **UN Comtrade** data, via their `comtradeapicall` python package. Users can access the raw data provided by national authorities or work with UN-harmonised data. For  tariff calculations, I assemble national sources.  
 
 ---
 
 ## Architecture 
 
-It is a **multi-language pipeline**, because good tools matter more than language purity.
+This project is a **multi-language pipeline**.
 
 ### Python: ingestion 
 Python handles:
