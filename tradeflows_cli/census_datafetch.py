@@ -5,7 +5,6 @@
 from __future__ import annotations
 import requests
 import pandas as pd
-import country_converter as coco
 import re
 import os
 from pathlib import Path
@@ -13,11 +12,12 @@ from dotenv import load_dotenv
 
 # import own modules
 from tradeflows_cli.paths import ensure_dataset_dirs, DataPaths
-from tradeflows_cli.logging import setup_logging, get_logger
+from tradeflows_cli.logging_setup import setup_logging, get_logger
+from tradeflows_cli.hs_codes import hs_index_path, update_hs_index
+
 
 
 logger = get_logger() # module-level logger
-
 
 # more detail on codes, `CTY_CODE` can be found at "https://www.census.gov/foreign-trade/schedules/c/countrycode.html"
 # extensive API documentation can be found here "https://www.census.gov/foreign-trade/reference/guides/Guide_to_International_Trade_Datasets.pdf"
@@ -34,6 +34,25 @@ def _safe_calc_tariff(df: pd.DataFrame) -> pd.Series:
     num = pd.to_numeric(df.get("CAL_DUT_MO"), errors="coerce")
     return (num / denom).where(denom > 0)
 
+
+def load_handover_codes(*,dataset: str, clCode: str, freqCode: str) -> list[str]:
+    paths = ensure_dataset_dirs("comtrade")
+    hp = hs_index_path(paths.meta, dataset=dataset, clCode=clCode, freqCode=freqCode)
+    df = pd.read_parquet(hp.index_file)
+    if "cmdCode" not in df.columns:
+        raise ValueError(f"Expected 'cmdCode' in {hp.index_file}. Found {list(df.columns)}.")
+    return df["cmdCode"].dropna().astype(str).str.strip().tolist()
+
+def normalise_codes(codes: list[str], *, granularity: int) -> list[str]:
+    """
+    Keep only codes of a given length. 
+    Deal with duplicates.
+    """
+    if granularity not in (2,4,6,8,10):
+        raise ValueError("Granularity must be one of 2,4,6,8,10.")
+    
+    out = sorted({c for c in codes if c.isdigit() and len(c) == granularity})
+    return out
 
 def fetch_hs_import_data(
     api_key: str,
@@ -115,6 +134,9 @@ def fetch_hs_import_data(
         except Exception as e:
             logger.info(f"Attempt {attempt+1}/3 failed: {e}")
 
+    # deal with the empty data case
+    if r.status_code == 204:
+        return pd.DataFrame(columns = ["CTY_CODE", "CTY_NAME","CON_VAL_MO", "CAL_DUT_MO", "I_COMMODITY","I_COMMODITY_SDESC","time"])
 
     # convert to data
     data = r.json()
@@ -131,19 +153,36 @@ def fetch_hs_import_data(
 
 def run_tariff_download(
     *,
-    cmdCodes: tuple[str, ...] | list[str],
     start_date: str,
     end_date: str,
+    granularity: int = 10, 
     overwrite: bool = False,
+    cmdCodes: list[str] | None = None,
+    handover_dataset: str = "Tariffline",
+    handover_clCode: str = "HS",
+    handover_freqCode: str= "M",
 ) -> None:
     """
     For a list of cmdCodes and date range, produce and save parquets of tariff rates per cmdCode.
     """
+
     # load API key
     load_dotenv()
     api_key = os.getenv("CENSUS_API_KEY")
     if not api_key:
         raise RuntimeError("Missing CENSUS_API_KEY in .env")
+
+    if cmdCodes and len(cmdCodes) > 0 : 
+        raw_codes = cmdCodes
+        source = "cli"
+    else:
+        raw_codes = load_handover_codes(dataset=handover_dataset, clCode=handover_clCode, freqCode=handover_freqCode)
+        source = f"handover:{handover_dataset}/{handover_clCode}/{handover_freqCode}"
+
+    cmdCodes = normalise_codes(raw_codes, granularity=granularity)
+    if not cmdCodes:
+        raise ValueError(f"No valid HS{granularity} codes from {source}")
+
     
     paths = ensure_dataset_dirs("census")
     setup_logging(paths.logs, timestamped=True)
@@ -159,28 +198,28 @@ def run_tariff_download(
             continue
 
         # pull data from Census api
-        df = fetch_hs_import_data(api_key, cmdCode, start_date, end_date)
+        df = fetch_hs_import_data(api_key, cmdCode, start_date, end_date, granularity=granularity)
 
-        # create `ISO3` column
-        cc = coco.CountryConverter()
-        df_iso3 = cc.pandas_convert(df["CTY_NAME"], to="ISO3")
-        df["ISO3"] = df_iso3
+        if df.empty:
+            logger.info("No Census data (204) for %s in %s...%s. Skipping.", cmdCode, start_date, end_date)
+            continue
 
-        # perform tariff calc
+                # perform tariff calc
         df["CALC_TARIFF"] = _safe_calc_tariff(df)
 
         # select
-        df_ready = df[["time", "ISO3", "CTY_NAME", "I_COMMODITY", "CALC_TARIFF"]]
+        df_ready = df[["time", "CTY_NAME", "I_COMMODITY", "CALC_TARIFF", "CON_VAL_MO","CAL_DUT_MO"]]
 
-        df_ready.to_parquet(output_file, index=False)
-
+        df_ready.to_parquet(output_file, index=False, compression="zstd")
 
 if __name__ == "__main__":
-    # Example usage
-    # Ensure you have a .env with: CENSUS_API_KEY=your_key
     run_tariff_download(
-        cmdCodes=("0901110015",),  # Note the trailing comma to make it a tuple
-        start_date="2025-04",
-        end_date="2025-07",
-        overwrite=False,
+        start_date="2025-01",
+        end_date="2025-03",
+        granularity=10,
+        overwrite=True,
+        cmdCodes=None,
+        handover_dataset="Tariffline",
+        handover_clCode="HS",
+        handover_freqCode="M"
     )

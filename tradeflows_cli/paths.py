@@ -35,7 +35,7 @@ def ensure_dataset_dirs(dataset: str) -> DataPaths:
     Creates, or verifies existence, of paths for a given dataset ('comtrade' or 'census')
     """
     paths = dataset_paths(dataset)
-    for p in [paths.base, paths.raw, paths.parquet, paths.logs]:
+    for p in [paths.base, paths.raw, paths.parquet, paths.logs, paths.meta]:
         p.mkdir(parents=True, exist_ok=True)
     return paths
 

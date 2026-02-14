@@ -13,7 +13,7 @@ class HSCodeIndexPaths:
     index_file: Path
 
 def hs_index_path(paths_meta: Path, *, dataset: str, clCode: str, freqCode: str) -> HSCodeIndexPaths:
-    fname = f"hs_codes__datset={dataset}__cl={clCode}__freq={freqCode}.parquet"
+    fname = f"hs_codes__dataset={dataset}__cl={clCode}__freq={freqCode}.parquet"
     return HSCodeIndexPaths(index_file= paths_meta / fname)
 
 def _now_utc_iso() -> str:

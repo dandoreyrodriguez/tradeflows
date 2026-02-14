@@ -1,15 +1,27 @@
-[project]
-name = "tradeflows"
-version = "0.1.0"
-requires-python = ">=3.10"
-
-[project.scripts]
-tradeflows = "tradeflows_cli.tradeflows_cli:main"
-
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[project]
+name = "tradeflows"
+version = "0.1.0"
+description = "Tradeflows: UN Comtrade + US Census trade/tariff data pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Daniel Dorey Rodriguez" }]
+
+dependencies = [
+  "requests>=2.31",
+  "pandas>=2.1",
+  "python-dotenv>=1.0",
+  "country_converter>=1.2",
+  "pyarrow>=14",
+]
+
+[project.scripts]
+tradeflows = "tradeflows_cli.cli:main"
+
 [tool.setuptools]
-packages = ["tradeflows_cli"]
-py-modules = ["comtrade_datafetch"]
+package-dir = {"" = "."}
+

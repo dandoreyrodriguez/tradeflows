@@ -11,7 +11,6 @@ from pathlib import Path
 import os
 import re
 import inspect
-import logging
 import json
 import pandas as pd
 from dotenv import load_dotenv
@@ -21,7 +20,7 @@ import comtradeapicall
 
 # import own modules
 from tradeflows_cli.paths import ensure_dataset_dirs, DataPaths
-from tradeflows_cli.logging import setup_logging, get_logger
+from tradeflows_cli.logging_setup import setup_logging, get_logger
 from tradeflows_cli.hs_codes import hs_index_path, update_hs_index
 
 logger = get_logger() # module-level logger
@@ -223,32 +222,43 @@ def convert_period_txt_to_parquet(
 
     for txt in txt_files:
 
-        output_file = parquet_dir / (txt.stem + ".parquet")
-        
-        if output_file.exists() and (not overwrite):
-            logger.debug("  Skipping Parquet conversion...parquet already exists")
-            continue
+        processed_ok = False
 
-        if chunk_size is None:
-            df = pd.read_csv(txt, sep=sep, low_memory=False)
-            per_period_cmdCodes.update(df["cmdCode"].dropna().astype(str).str.strip()) # extract unique HS codes
-            df.to_parquet(output_file, index=False)
-            written.append(output_file)
-        else:
-            part = 0
-            for chunk in pd.read_csv(
-                txt, sep=sep, low_memory=False, chunksize=chunk_size
-            ):
-                part_file = parquet_dir / f"{txt.stem}.part{part:04d}.parquet"
-                if part_file.exists() and (not overwrite):
-                    logger.debug("  Skipping Parquet part %s conversion...parquet already exists", part)
-                    part += 1
-                    continue
-                else:
-                    per_period_cmdCodes.update(chunk["cmdCode"].dropna().astype(str).str.strip()) # extract unique HS codes
-                    chunk.to_parquet(part_file, index=False)
-                    written.append(part_file)
-                    part += 1
+        try: 
+            output_file = parquet_dir / (txt.stem + ".parquet")
+        
+            if output_file.exists() and (not overwrite):
+                logger.debug("  Skipping Parquet conversion...parquet already exists")
+                continue
+
+            if chunk_size is None:
+                df = pd.read_csv(txt, sep=sep, low_memory=False)
+                per_period_cmdCodes.update(df["cmdCode"].dropna().astype(str).str.strip()) # extract unique HS codes
+                df.to_parquet(output_file, index=False, compression="zstd")
+                written.append(output_file)
+            else:
+                part = 0
+                for chunk in pd.read_csv(
+                    txt, sep=sep, low_memory=False, chunksize=chunk_size
+                ):
+                    part_file = parquet_dir / f"{txt.stem}.part{part:04d}.parquet"
+                    if part_file.exists() and (not overwrite):
+                        logger.debug("  Skipping Parquet part %s conversion...parquet already exists", part)
+                        part += 1
+                        continue
+                    else:
+                        per_period_cmdCodes.update(chunk["cmdCode"].dropna().astype(str).str.strip()) # extract unique HS codes
+                        chunk.to_parquet(part_file, index=False, compression="zstd")
+                        written.append(part_file)
+                        part += 1
+            processed_ok = True
+
+        # unlink text file if parquet file creation successful
+        finally:
+            if processed_ok:
+                try: txt.unlink(missing_ok=True)
+                except Exception:
+                    logger.exception("Failed to delete raw .txt : %s", txt)
 
     return written, per_period_cmdCodes
 
