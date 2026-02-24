@@ -6,115 +6,90 @@
 
 # prepare workspace
 from __future__ import annotations
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from pathlib import Path
 import os
 import re
 import inspect
-import json
 import pandas as pd
 from dotenv import load_dotenv
-from collections.abc import Iterable
 from datetime import datetime, timezone
 import comtradeapicall
 
 # import own modules
-from tradeflows_cli.paths import ensure_dataset_dirs, DataPaths
-from tradeflows_cli.logging_setup import setup_logging, get_logger
-from tradeflows_cli.hs_codes import hs_index_path, update_hs_index
+from tradeflows.core.paths import ensure_dataset_dirs, DataPaths
+from tradeflows.core.logging import setup_logging, get_logger
+from tradeflows.core.utils import has_any_txt, as_int_list, _utc_now_iso, _dict_ready
+from tradeflows.metadata.hs_codes import hs_index_path, update_hs_index
 
-logger = get_logger() # module-level logger
-
-### 1. Configure  -------------------------------------
-
-def _json_ready(obj):
-    """
-    JSON only supports dict/list/str/number/bool/null.
-    Converts dicts/tuples to lists so JSON can handle them.
-    Note, this is recursive to handle dicts within dicts, etc.
-    """
-    if isinstance(obj, dict):
-        return {k: _json_ready(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_json_ready(v) for v in obj]
-    if isinstance(obj, tuple):
-        return [_json_ready(v) for v in obj]
-    if isinstance(obj, set):
-        return [_json_ready(v) for v in sorted(obj)]
-    if isinstance(obj, Path):
-        return str(obj)
-    return obj
-
-def write_manifest(report: MultiDownloadReport, manifest_path: Path) -> Path:
-    """
-    Convert MultiDownloadReport and content (including DownloadReportperReporter) into JSON manifest
-    """
-    payload = _json_ready(asdict(report))
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    # write the JSON
-    manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    return manifest_path
-
-
+logger = get_logger()  # module-level logger
+# allowed Comtrade arguments
 _ALLOWED_DATASETS = {"Tariffline", "Final"}
 _ALLOWED_FREQ = {"M", "A"}
+
+### 1. Comtrade Functions and classes -------------------------------------
 
 
 @dataclass(frozen=True)
 class ComtradeBulkConfig:
     """
-    Config file for a data retrieval fetch.
+    A dataclass for configuring Bulk Comtrade download calls.
     """
-    reporterCodes: tuple[int,...]   # tuple of integer codes
-    start: str                      # "YYYY-mm" if monthly, "YYYY" if annual
+
+    reporterCodes: tuple[int, ...]  # tuple of integer codes
+    start: str  # "YYYY-mm" if monthly, "YYYY" if annual
     end: str
-    typeCode: str = "C"             # commodities, can be "S" for services
-    clCode: str = "HS"              # HS classification system
-    freqCode: str = "M"             # "M" is monthly, "A" is annual
-    dataset: str = "Tariffline"     # for raw/reported data "Tariffline"; for harmonised data "Final"
+    typeCode: str = "C"  # commodities, can be "S" for services
+    clCode: str = "HS"  # HS classification system
+    freqCode: str = "M"  # "M" is monthly, "A" is annual
+    dataset: str = (
+        "Tariffline"  # for raw/reported data "Tariffline"; for harmonised data "Final"
+    )
     decompress: bool = True
-    overwrite: bool = False
+    overwrite: bool = False  # overwrites existing data
 
     def __post_init__(self) -> None:
 
         # dataset
         if self.dataset not in _ALLOWED_DATASETS:
-            raise ValueError(f"dataset must be one of {_ALLOWED_DATASETS}, got {self.dataset}")
+            raise ValueError(
+                f"dataset must be one of {_ALLOWED_DATASETS}, got {self.dataset}"
+            )
 
         # freq
         if self.freqCode not in _ALLOWED_FREQ:
-            raise ValueError(f"freqCode must be one of {_ALLOWED_FREQ}, got {self.freqCode}")
-        
+            raise ValueError(
+                f"freqCode must be one of {_ALLOWED_FREQ}, got {self.freqCode}"
+            )
+
         # reporter codes
         if not self.reporterCodes:
             raise ValueError("reporterCodes cannot be empty")
         if any((not isinstance(x, int)) for x in self.reporterCodes):
-            raise TypeError("reporterCodes must be ints")
+            raise TypeError("All reporterCodes must be integers.")
         if any(x <= 0 for x in self.reporterCodes):
-            raise ValueError("reporterCodes must be positive")
+            raise ValueError("reporterCodes must be positive integers.")
 
         # date formats
+        # monthly
         if self.freqCode == "M":
             if not re.fullmatch(r"\d{4}-\d{2}", self.start):
                 raise ValueError("Monthly start must be 'YYYY-MM'")
             if not re.fullmatch(r"\d{4}-\d{2}", self.end):
                 raise ValueError("Monthly end must be 'YYYY-MM'")
-        else:  # "A"
+        # annual
+        else:
             if not re.fullmatch(r"\d{4}", self.start):
                 raise ValueError("Annual start must be 'YYYY'")
             if not re.fullmatch(r"\d{4}", self.end):
                 raise ValueError("Annual end must be 'YYYY'")
 
-        # optional: logical ordering check
+        # ordering check
         if self.start > self.end:
-            raise ValueError(f"start must be <= end, got start='{self.start}' end='{self.end}'")
+            raise ValueError(
+                f"start must be <= end, got start='{self.start}' end='{self.end}'"
+            )
 
-
-
-### 2. Helper functions --------------------------------
-
-
-# i. List helpers
 
 def build_period_list(freqCode: str, start: str, end: str) -> list[str]:
     """
@@ -139,19 +114,19 @@ def build_period_list(freqCode: str, start: str, end: str) -> list[str]:
         # yearly range
         pr = range(int(start), int(end) + 1)
         return [str(p) for p in pr]
-    
-    else: raise ValueError("Invalid frequency code.")
 
-# ii. directory helpers
+    else:
+        raise ValueError("Invalid frequency code.")
 
-def raw_period_dir(
-    paths: DataPaths, 
-    cfg: ComtradeBulkConfig, 
-    period: str, 
+
+def raw_period_reporter_dir(
+    paths: DataPaths,
+    cfg: ComtradeBulkConfig,
+    period: str,
     reporter: int,
 ) -> Path:
     """
-    Creates a folder for raw data for a given reporter, period pair.  Consistent with Hive partitioning.
+    Creates a folder for the raw data for a given reporter, period pair. Consistent with Hive partitioning.
     """
     p = (
         paths.raw
@@ -165,14 +140,16 @@ def raw_period_dir(
     p.mkdir(parents=True, exist_ok=True)
     return p
 
+
 def parquet_period_dir(
-    paths: DataPaths, 
-    cfg: ComtradeBulkConfig, 
+    paths: DataPaths,
+    cfg: ComtradeBulkConfig,
     period: str,
     reporter: int,
 ) -> Path:
     """
-    Creates a folder for paqruet data for a given reporter, period pair.  Consistent with Hive partitioning.
+    Creates a folder for parquet data for a given reporter, period pair. Consistent with Hive partitioning.
+    This will house what is in `raw` once converted.
     """
     p = (
         paths.parquet
@@ -187,19 +164,6 @@ def parquet_period_dir(
     return p
 
 
-def has_any_txt(dirpath: Path) -> bool:
-    """
-    True if directory contains at least one .txt file (recursively).
-    """
-    return any(p.suffix.lower() == ".txt" for p in dirpath.glob("**/*"))
-
-def has_any_parquet(dirpath: Path) -> bool:
-    return any(p.is_file() for p in dirpath.rglob("*.parquet"))
-
-
-
-# iii. parquet writer
-
 def convert_period_txt_to_parquet(
     raw_dir: Path,
     parquet_dir: Path,
@@ -210,64 +174,88 @@ def convert_period_txt_to_parquet(
 ) -> tuple[list[Path], set[str]]:
     """
     Converts every .txt file in raw_dir into a .parquet file in parquet_dir.
+    If the .txt is large enough and a chunk_size is specified it will do this
+    by creating several parquets.
+
     Returns a list of parquets created.
     """
-    txt_files = sorted(raw_dir.glob("**/*.txt"))
+
+    txt_files = sorted(raw_dir.glob("**/*.txt"))  # all .txt files in raw_dir
     if not txt_files:
         raise ValueError(f"No .txt files found under {raw_dir}!")
 
-    written: list[Path] = []
-    per_period_cmdCodes = set() # catcher of unique codes
+    written: list[Path] = []  # to catch new parquets
+    per_period_cmdCodes = set()  # catcher of unique codes
 
-
+    # loop over txt_files
     for txt in txt_files:
 
-        processed_ok = False
+        processed_ok = False  # to keep track of progress
 
-        try: 
-            output_file = parquet_dir / (txt.stem + ".parquet")
-        
+        try:
+
+            output_file = parquet_dir / "raw.parquet"  # file of parquet-to-be
             if output_file.exists() and (not overwrite):
                 logger.debug("  Skipping Parquet conversion...parquet already exists")
                 continue
 
+            # if chunk_size is None write one parquet
             if chunk_size is None:
                 df = pd.read_csv(txt, sep=sep, low_memory=False)
-                per_period_cmdCodes.update(df["cmdCode"].dropna().astype(str).str.strip()) # extract unique HS codes
-                df.to_parquet(output_file, index=False, compression="zstd")
+                per_period_cmdCodes.update(
+                    df["cmdCode"].dropna().astype(str).str.strip()
+                )  # extract unique HS codes
+                df.to_parquet(
+                    output_file, index=False, compression="zstd"
+                )  # compresses data
                 written.append(output_file)
+            # else if chunk_size is specified write parquets in parts
             else:
-                part = 0
+                part = 0  # start with part 0
                 for chunk in pd.read_csv(
                     txt, sep=sep, low_memory=False, chunksize=chunk_size
                 ):
-                    part_file = parquet_dir / f"{txt.stem}.part{part:04d}.parquet"
+                    part_file = parquet_dir / f"raw.part{part:04d}.parquet"
                     if part_file.exists() and (not overwrite):
-                        logger.debug("  Skipping Parquet part %s conversion...parquet already exists", part)
+                        logger.debug(
+                            "  Skipping Parquet part %s conversion...parquet already exists",
+                            part,
+                        )
                         part += 1
                         continue
                     else:
-                        per_period_cmdCodes.update(chunk["cmdCode"].dropna().astype(str).str.strip()) # extract unique HS codes
+                        per_period_cmdCodes.update(
+                            chunk["cmdCode"].dropna().astype(str).str.strip()
+                        )  # extract unique HS codes
                         chunk.to_parquet(part_file, index=False, compression="zstd")
                         written.append(part_file)
                         part += 1
-            processed_ok = True
 
-        # unlink text file if parquet file creation successful
+            processed_ok = True  # writing has been successful
+
+        # unlink text file if parquet file creation successful (for memory)
         finally:
             if processed_ok:
-                try: txt.unlink(missing_ok=True)
+                try:
+                    txt.unlink(missing_ok=True)
                 except Exception:
                     logger.exception("Failed to delete raw .txt : %s", txt)
 
     return written, per_period_cmdCodes
 
-# iii. Checking data availability in UN comtrade
 
 def require_fn(name: str):
-    fn = getattr(comtradeapicall, name, None)
+    """
+    Returns attribute of comtradeapicall which matches name supplied. If not, returns valid attributes.
+
+    :param name: function name (e.g. "getTarifflineDataBulkAvailability")
+    :type name: str
+    """
+    fn = getattr(comtradeapicall, name, None)  # gets the attribute
     if fn is None:
-        available = [n for n, o in inspect.getmembers(comtradeapicall, inspect.isfunction)]
+        available = [
+            n for n, o in inspect.getmembers(comtradeapicall, inspect.isfunction)
+        ]
         raise RuntimeError(
             f"Your comtradeapicall install has no '{name}'.\n"
             f"Available functions include: {available}"
@@ -275,13 +263,16 @@ def require_fn(name: str):
     return fn
 
 
-def get_bulk_availability(api_key: str, *, reporterCode: int, cfg: ComtradeBulkConfig) -> pd.DataFrame | None:
+def get_bulk_availability(
+    api_key: str, *, reporterCode: int, cfg: ComtradeBulkConfig
+) -> pd.DataFrame | None:
     """
-    Returns availability dataframe which must have a 'period' column.
-    Tariffline availability if cfg.dataset='tariffline'. Final availability if cfg.dataset='Final'.
+    Returns availability dataframe for a given reporterCode which must have a 'period' column.
+    Remember, it is specific to the type of data called (i.e. "Tariffline" or "Final")
     """
+
     if cfg.dataset == "Tariffline":
-        fn = require_fn("getTarifflineDataBulkAvailability")  
+        fn = require_fn("getTarifflineDataBulkAvailability")
         df = fn(
             api_key,
             typeCode=cfg.typeCode,
@@ -291,7 +282,7 @@ def get_bulk_availability(api_key: str, *, reporterCode: int, cfg: ComtradeBulkC
             reporterCode=reporterCode,
         )
     elif cfg.dataset == "Final":
-        fn = require_fn("getFinalDataBulkAvailability")       
+        fn = require_fn("getFinalDataBulkAvailability")
         df = fn(
             api_key,
             typeCode=cfg.typeCode,
@@ -301,13 +292,19 @@ def get_bulk_availability(api_key: str, *, reporterCode: int, cfg: ComtradeBulkC
             reporterCode=reporterCode,
         )
     else:
-        raise ValueError("Please insert a valid comtrade dataset ('Tariffline' or 'Final')") 
+        raise ValueError(
+            "Please insert a valid comtrade dataset ('Tariffline' or 'Final')"
+        )
 
+    # convert to df if not
     if not isinstance(df, pd.DataFrame):
         df = pd.DataFrame(df)
-    
+
+    # if empty return None (makes diagnoising easier down the line)
     if df.empty:
         return None
+
+    # returns the list of periods available
     else:
         df["period"] = df["period"].astype(str)
         return df
@@ -322,32 +319,44 @@ def select_available_periods(
     if "period" not in availability_df.columns:
         raise ValueError("availability_df must have a column called 'period'")
     available = set(availability_df["period"])
+    # return a sorter list of months which are available
     return sorted([p for p in requested_periods if p in available])
 
-# iv. Comtrade download functions
 
 def download_one_period(
-        api_key: str, 
-        cfg : ComtradeBulkConfig, 
-        paths: DataPaths,
-        reporter: int,
-        period: str, 
-        *,
-        convert_to_parquet: bool = True, 
-        chunk_size: int | None = 1_000_000,
+    api_key: str,
+    cfg: ComtradeBulkConfig,
+    paths: DataPaths,
+    reporter: int,
+    period: str,
+    *,
+    convert_to_parquet: bool = True,
+    chunk_size: int | None = 1_000_000,
 ) -> set[str]:
     """
-    Download one raw .txt file per reporter, period pair.
+    Download sone raw .txt file per reporter, period pair and store in a names path in paths.
+    Converts to parquet if convert_to_parquet is True.
+    Returns unique HS codes which are retrieved.
     """
-    raw_dir = raw_period_dir(paths, cfg, period, reporter)
+
+    raw_dir = raw_period_reporter_dir(
+        paths, cfg, period, reporter
+    )  # sets up right folder foor period, reporter
 
     # if cfg.overwrite is False and there is a raw file already
     if (not cfg.overwrite) and has_any_txt(raw_dir):
-        logger.info("Skipping download...raw data for reporter %s in %s already exists.", reporter, period)
-    else: 
-        logger.info("Downloading %s data for reporter %s in %s.", cfg.dataset, reporter, period) 
+        logger.info(
+            "Skipping download...raw data for reporter %s in %s already exists.",
+            reporter,
+            period,
+        )
+    else:
+        logger.info(
+            "Downloading %s data for reporter %s in %s.", cfg.dataset, reporter, period
+        )
 
-        if cfg.dataset=="Tariffline":
+        # set up right datset
+        if cfg.dataset == "Tariffline":
             fn = require_fn("bulkDownloadTarifflineFile")
         else:
             fn = require_fn("bulkDownloadFinalFile")
@@ -367,29 +376,37 @@ def download_one_period(
         except Exception:
             logger.exception(
                 "Download failed dataset=%s reporter=%s period=%s raw_dir=%s",
-                cfg.dataset, reporter, period, raw_dir
+                cfg.dataset,
+                reporter,
+                period,
+                raw_dir,
             )
             raise
 
-    per_period_cmdCodes: set[str] = set()
+    per_period_reporter_cmdCodes: set[str] = set()  # catcher for unique hs codes
 
+    # write parquets (and deletes .txt files in convert_period_txt_to_parquet)
     if convert_to_parquet:
         pq_dir = parquet_period_dir(paths, cfg, period, reporter)
-        written, per_period_cmdCodes = convert_period_txt_to_parquet(raw_dir, pq_dir, overwrite=cfg.overwrite, chunk_size=chunk_size)
-        idx = hs_index_path(paths.meta, dataset=cfg.dataset, clCode=cfg.clCode, freqCode=cfg.freqCode)
-        _ = update_hs_index(idx.index_file, new_codes=per_period_cmdCodes)
-
+        written, per_period_reporter_cmdCodes = convert_period_txt_to_parquet(
+            raw_dir, pq_dir, overwrite=cfg.overwrite, chunk_size=chunk_size
+        )
+        idx = hs_index_path(
+            paths.meta, dataset=cfg.dataset, clCode=cfg.clCode, freqCode=cfg.freqCode
+        )
+        _ = update_hs_index(idx.index_file, new_codes=per_period_reporter_cmdCodes)
         if written:
             logger.info(" Parquet written: %s file(s) for %s.", len(written), period)
 
-    return per_period_cmdCodes
-        
+    return per_period_reporter_cmdCodes
+
 
 @dataclass(frozen=True)
 class DownloadReportperReporter:
     """
-    Download report per reporter.
+    A Dataclass for a download report per reported. Useful for manifests.
     """
+
     reporter: int
     requested: list[str]
     available_within_request: list[str]
@@ -401,25 +418,28 @@ class DownloadReportperReporter:
 
 
 def download_bulk_range_one(
-        api_key: str,
-        cfg: ComtradeBulkConfig,
-        paths: DataPaths,
-        *,
-        reporter: int, 
-    ) -> DownloadReportperReporter:
+    api_key: str,
+    cfg: ComtradeBulkConfig,
+    paths: DataPaths,
+    *,
+    reporter: int,
+) -> DownloadReportperReporter:
     """
     For one reporter, download requested dataset from cfg.start to cfg.end.
     """
-    requested_periods = build_period_list(cfg.freqCode, cfg.start, cfg.end)
-    
-    available_df = get_bulk_availability(api_key, reporterCode=reporter, cfg=cfg)
 
+    # get requested months, availability df, and initialise hs_codes for metadata.
+    requested_periods = build_period_list(cfg.freqCode, cfg.start, cfg.end)
+    available_df = get_bulk_availability(api_key, reporterCode=reporter, cfg=cfg)
     per_reporter_cmdCodes: set[str] = set()
 
-    if available_df is None: 
-        logger.info("No available %s data at all for reporter %s.", cfg.dataset, reporter)
+    # if no availability, stop.
+    if available_df is None:
+        logger.info(
+            "No available %s data at all for reporter %s.", cfg.dataset, reporter
+        )
         return DownloadReportperReporter(
-            reporter=reporter, 
+            reporter=reporter,
             requested=requested_periods,
             available_within_request=[],
             missing_within_request=requested_periods,
@@ -428,20 +448,26 @@ def download_bulk_range_one(
             max_available=None,
             unique_hs_codes=set(),
         )
-    
+
+    # select available periods and save missing
     available_periods = select_available_periods(requested_periods, available_df)
     available_set = set(available_periods)
     missing = [p for p in requested_periods if p not in available_set]
 
+    # record min, max available data
     min_possible = str(available_df["period"].min()) if not available_df.empty else None
     max_possible = str(available_df["period"].max()) if not available_df.empty else None
 
-    downloaded_or_present: list[str] = []
-    
+    downloaded_or_present: list[str] = (
+        []
+    )  # catcher for if downloaded successfully or already there if not overwriting
+
     for period in available_periods:
-        per_period_cmdCodes = download_one_period(api_key, cfg, paths, reporter = reporter, period=period)
+        per_period_reporter_cmdCodes = download_one_period(
+            api_key, cfg, paths, reporter=reporter, period=period
+        )
         downloaded_or_present.append(period)
-        per_reporter_cmdCodes.update(per_period_cmdCodes)
+        per_reporter_cmdCodes.update(per_period_reporter_cmdCodes)
 
     return DownloadReportperReporter(
         reporter=reporter,
@@ -473,15 +499,31 @@ class MultiDownloadReport:
 
 
 def download_bulk_range_many(
-        api_key: str, 
-        cfg: ComtradeBulkConfig,
-        paths: DataPaths
-    ) -> MultiDownloadReport:
+    api_key: str, cfg: ComtradeBulkConfig, paths: DataPaths
+) -> MultiDownloadReport:
+    """
+    For a given ComtradeBulkConfig file, downloads the data in the relevant files
+    with paths as basis.
 
-    per: dict[int, DownloadReportperReporter] = {}
+    :param api_key: Comtrade API key
+    :type api_key: str
+    :param cfg: Configuration file for Comtrade download
+    :type cfg: ComtradeBulkConfig
+    :param paths: skeleton of paths ontop of which to write raw data, parquets, and metadata. Defined in src.tradeflows.core.paths
+    :type paths: DataPaths
+    :return: Returns a custom report containing headline information and all the individual reporter reports.
+    :rtype: MultiDownloadReport
+    """
 
+    per: dict[int, DownloadReportperReporter] = (
+        {}
+    )  # to catch each reporter's individual report
+
+    # loop over reporters
     for reporter in cfg.reporterCodes:
-        report_per_reporter = download_bulk_range_one(api_key, cfg, paths, reporter=reporter)
+        report_per_reporter = download_bulk_range_one(
+            api_key, cfg, paths, reporter=reporter
+        )
         per[reporter] = report_per_reporter
 
     # totals (simple and transparent)
@@ -499,31 +541,45 @@ def download_bulk_range_many(
         total_reporters=len(per),
         total_requested_periods=total_requested_periods,
         total_downloaded_periods=total_downloaded_periods,
-        total_missing_periods=total_requested_periods-total_downloaded_periods,
+        total_missing_periods=total_requested_periods - total_downloaded_periods,
         per_reporter=per,
     )
 
 
-# v. Util helpers
-
-def as_int_list(x) -> list[int]:
+def build_comtrade_manifest(
+    *,
+    multi_report: MultiDownloadReport,
+    cfg: ComtradeBulkConfig,
+    paths: DataPaths,
+    iso3_to_reporters: dict[str, list[int]],
+    repo_root: Path,
+    schema_version: str = "v 1.0.0",
+) -> dict[str, Any]:
     """
-    Accepts a string of country codes (e.g. "840, 841, 842") and returns a list of integers (e.g. [840, 841, 842])
+    Function to build a standardised manifest for comtrade fetch.
     """
-    if x is None: return []
+    created_utc = _utc_now_iso()
 
-    if isinstance(x, str):
-        return [int(v.strip()) for v in x.split(",") if v.strip()]
+    header = {
+        "schema_version": schema_version,
+        "created_utc": created_utc,
+        "host": {
+            "user": os.getenv("USER") or os.getenv("USERNAME"),
+            "machine": os.uname().nodename if hasattr(os, "uname") else None,
+        },
+    }
 
-    if isinstance(x, int): return [x]
+    inputs = {
+        "data_source": "comtrade",
+        "iso3_to_reporters": iso3_to_reporters,
+        "config": _dict_ready(cfg),
+    }
 
-    if isinstance(x, Iterable) and not isinstance(x, str):
-        return [int(v) for v in x]
-
-    raise TypeError(f"Cannot convert {type(x)} to list[int].")
+    # COME BACK FOR MORE
 
 
-## 3. Execution code ----------------
+## 2. Execution code --------------------------------------
+
 
 def run_comtrade_download(
     *,
@@ -537,24 +593,44 @@ def run_comtrade_download(
     decompress: bool = True,
     overwrite: bool = False,
 ) -> None:
-    
+    """
+    run_comtrade_download is the execution function per Comtrade download call.
+
+    :param iso3_codes: List of ISO3 codes to download data for.
+    :type iso3_codes: list[str]
+    :param start: start date.
+    :type start: str
+    :param end: end date.
+    :type end: str
+    :param dataset: "Tariffline" or "Final" Comtrade data
+    :type dataset: str
+    :param freqCode: Frquency of data ("M" or "A")
+    :type freqCode: str
+    :param typeCode: Commodities ("C") or services ("S")
+    :type typeCode: str
+    :param clCode: Classification type ("HS" or other)
+    :type clCode: str
+    :param decompress: Whether to decompress.
+    :type decompress: bool
+    :param overwrite: Whether to overwrite data if it exists.
+    :type overwrite: bool
+    """
+
+    # load API key
     load_dotenv()
     api_key = os.getenv("COMTRADE_API_KEY_PRIMARY")
     if not api_key:
         raise RuntimeError("Missing COMTRADE_API_KEY_PRIMARY in .env")
 
+    # ensure dataset directories are set up
     paths = ensure_dataset_dirs("comtrade")
     _ = setup_logging(paths.logs, timestamped=True)
 
-    mapping: dict[str, list[int]] = {}
+    mapping: dict[str, list[int]] = {}  # catcher mapping ISO3 to reporter codes
     for iso3 in iso3_codes:
         raw = comtradeapicall.convertCountryIso3ToCode(iso3)
         mapping[iso3] = as_int_list(raw)
-
-    all_reporter_codes = sorted(
-        {code for codes in mapping.values() for code in codes}
-    )
-
+    all_reporter_codes = sorted({code for codes in mapping.values() for code in codes})
     cfg = ComtradeBulkConfig(
         reporterCodes=tuple(all_reporter_codes),
         start=start,
@@ -562,21 +638,9 @@ def run_comtrade_download(
         typeCode=typeCode,
         clCode=clCode,
         freqCode=freqCode,
-        dataset=dataset, 
-        decompress=decompress, 
+        dataset=dataset,
+        decompress=decompress,
         overwrite=overwrite,
     )
 
-    multi = download_bulk_range_many(api_key, cfg, paths)
-
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    manifest_path = paths.logs / f"download_manifest_{ts}.json"
-    write_manifest(multi, manifest_path)
-    logger.info("Manifest written: %s", manifest_path)
-
-
-
-
-
-
-
+    multi_report = download_bulk_range_many(api_key, cfg, paths)

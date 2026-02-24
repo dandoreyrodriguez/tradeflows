@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tradeflows"
 version = "0.1.0"
-description = "Tradeflows: UN Comtrade + US Census trade/tariff data pipeline"
+description = "Project Tradeflows is a visualisation of the structure of global trade."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -19,9 +19,6 @@ dependencies = [
   "pyarrow>=14",
 ]
 
-[project.scripts]
-tradeflows = "tradeflows_cli.cli:main"
-
-[tool.setuptools]
-package-dir = {"" = "."}
+[tool.setuptools.packages.find]
+where = ["src"]
 
