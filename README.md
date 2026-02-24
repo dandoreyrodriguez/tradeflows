@@ -8,7 +8,13 @@ The pipeline uses **UN Comtrade** data, via their `comtradeapicall` python packa
 
 ---
 
-## Architecture 
+## The TradeFlows Philosophy
+
+1. What decision problem do importers/exporters face?
+3. What is the primative of equilibrium which is policy invariant? 
+4. Mount **Project Tradeflows** to retrieve data at the level of the decision being made. 
+5. Infer economic structure.
+6. Run policy counterfacturals.  
 
 
 
