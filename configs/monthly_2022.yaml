@@ -1,0 +1,9 @@
+reporter_scope: "all"
+start_period: "202201"
+end_period: null
+typeCode: "C"
+clCode: "HS"
+freqCode: "M"
+dataset: "Final"
+reporterCodes: null
+

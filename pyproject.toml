@@ -1,24 +1,44 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "tradeflows"
 version = "0.1.0"
-description = "Project Tradeflows is a visualisation of the structure of global trade."
+description = "Availability-led UN Comtrade ingestion pipeline"
 readme = "README.md"
-requires-python = ">=3.10"
-license = { text = "MIT" }
-authors = [{ name = "Daniel Dorey Rodriguez" }]
-
-dependencies = [
-  "requests>=2.31",
-  "pandas>=2.1",
-  "python-dotenv>=1.0",
-  "country_converter>=1.2",
-  "pyarrow>=14",
+requires-python = ">=3.11"
+authors = [
+  { name = "Daniel Dorey Rodriguez" }
 ]
+dependencies = [
+  "pandas>=2.2.0",
+  "pyyaml>=6.0.1",
+  "python-dotenv>=1.0.1",
+  "pyarrow>=17.0.0",
+  "comtradeapicall"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2.0",
+  "ruff>=0.6.0",
+  "mypy>=1.10.0"
+]
+
+[project.scripts]
+tradeflows = "tradeflows.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

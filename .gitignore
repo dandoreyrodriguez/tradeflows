@@ -1,20 +1,69 @@
-# Secrets
-.env
+#------------------------------
+# Python bytecode and caches
+# -----------------------------
+__pycache__/
+*.py[cod]
+*$py.class
 
-# Data outputs
+# -----------------------------
+# Virtual environments
+# -----------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# -----------------------------
+# Environment and secrets
+# -----------------------------
+.env
+.env.*
+!.env.example
+
+# -----------------------------
+# Build, packaging, and eggs
+# -----------------------------
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+pip-wheel-metadata/
+
+# -----------------------------
+# Tool caches and reports
+# -----------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# -----------------------------
+# Data artifacts (generated)
+# -----------------------------
 data/
 *.parquet
-*.txt
-*.duckdb
+*.csv
 
-# Python cache / build
-__pycache__/
-*.pyc
-*.egg-info/
-
-# Logs
+# -----------------------------
+# Logs and temporary files
+# -----------------------------
 *.log
+*.tmp
+*.swp
+*.swo
 
-# OS / editor
-.DS_Store
+# -----------------------------
+# IDE/editor files
+# -----------------------------
 .vscode/
+.idea/
+*.code-workspace
+
+# -----------------------------
+# OS files
+# -----------------------------
+.DS_Store
+Thumbs.db
